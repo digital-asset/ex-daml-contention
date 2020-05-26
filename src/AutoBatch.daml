@@ -1,0 +1,126 @@
+module AutoBatch where
+
+import Prelude hiding (length, null)
+import DA.Foldable
+import DA.List ((!!), dedup)
+import DA.Next.Map (Map)
+import qualified DA.Next.Map as Map
+import Daml.Trigger
+import Model
+import Lock
+
+-- This module implements a trigger that automatically splits up a large request
+-- into batches of the given size and acquires and releases the necessary
+-- locks before and after it has finished
+
+-- | This is the template the trigger will listen for.
+-- Once the request has finished this will be archived.
+template BatchRequest
+  with
+    p : Party
+    keyIds : [KeyId]
+    batchSize : Int
+    requestId : Int
+  where
+    signatory p
+    key (p, requestId) : (Party, Int)
+    maintainer key._1
+    ensure (not $ null keyIds)
+
+-- | The trigger will create this template once it has finished.
+-- processing the request
+template RequestDone
+  with
+    req : BatchRequest
+  where
+    signatory (signatory req)
+    key (req.p, req.requestId) : (Party, Int)
+    maintainer key._1
+
+-- | Split up the request into smaller chunks of
+-- the given size. The last chunk can be smaller.
+requestChunks : BatchRequest -> [[KeyId]]
+requestChunks req = chunksOf req.batchSize req.keyIds
+
+-- | The current state of the request. We persist this on the
+-- ledger so the trigger can be killed and restarted
+-- at any time.
+template RequestState
+  with
+    req : BatchRequest
+    nextIndex : Int -- The index of the next part we want to process
+    locked : Bool -- Whether we have already acquired locks for the next chunk
+  where
+    signatory (signatory req)
+    key (req.p, req.requestId) : (Party, Int)
+    maintainer key._1
+    -- This choice acquires the locks for the next chunk.
+    choice LockChunk : ContractId RequestState
+      controller req.p
+      do let keysInChunk = requestChunks req !! nextIndex
+         let requiredLocks = dedup $ map keyIdToLockIndex keysInChunk
+         forA_ requiredLocks $ create . Lock req.p
+         create this with locked = True
+
+    -- Assuming we have acquired the locks already, this
+    -- choice will execute the batch.
+    choice ExecuteBatch : Either (ContractId RequestDone) (ContractId RequestState)
+      controller req.p
+      do assert locked
+         let chunks = chunksOf req.batchSize req.keyIds
+         let keysInChunk = chunks !! nextIndex
+         let requiredLocks = dedup $ map keyIdToLockIndex keysInChunk
+         -- Run the batch.
+         createAndExercise (Batch req.p) (Act keysInChunk)
+         -- Release the locks.
+         forA_ requiredLocks $ \lockId -> exerciseByKey @Lock (req.p, lockId) Archive
+         if (nextIndex == length chunks - 1)
+            then do
+              -- We are finished, archive the request and create RequestDone.
+              exerciseByKey @BatchRequest (req.p, req.requestId) Archive
+              Left <$> create (RequestDone req)
+            else do
+              -- We are not finished yet, move to the next chunk.
+              Right <$> create this with locked = False, nextIndex = nextIndex + 1
+
+
+autoBatch : Trigger ()
+autoBatch = Trigger with
+  initialize = const ()
+  updateState = \_ _ _ -> ()
+  heartbeat = None
+  registeredTemplates = AllInDar
+  rule = autoBatchRule
+
+chunksOf : Int -> [a] -> [[a]]
+chunksOf size xs = case splitAt size xs of
+  (as, bs)
+    | null as -> []
+    | null bs -> [as]
+    | otherwise -> as :: chunksOf size bs
+
+autoBatchRule : Party -> ACS -> Time -> Map CommandId [Command] -> () -> TriggerA ()
+autoBatchRule p acs _ _ _ = do
+  let requests = getContracts @BatchRequest acs
+  let states = Map.fromList $ map (\(cid, c) -> (c.req.requestId, (cid, c))) $ getContracts @RequestState acs
+  forA_ requests $ \(reqCid, req) -> do
+      case Map.lookup req.requestId states of
+        None -> do
+          -- We got a new request, initialize the state.
+          debug "Initializing state"
+          _ <- emitCommands [createCmd $ RequestState req 0 False] [toAnyContractId reqCid]
+          pure ()
+        Some (stateCid, state) -> do
+          -- Our state is initialized, so let’s get to work!
+          if not state.locked
+            then do
+              -- First acquire the lock
+              debug "Acquiring lock"
+              _ <- emitCommands [exerciseCmd stateCid LockChunk] [toAnyContractId reqCid]
+              pure ()
+            else do
+              -- Now we have the lock, so do stuff!
+              debug ("Executing batch number: " <> show state.nextIndex)
+              _ <- emitCommands [exerciseCmd stateCid ExecuteBatch] [toAnyContractId reqCid]
+              pure ()
+

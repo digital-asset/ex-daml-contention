@@ -1,0 +1,39 @@
+module Model where
+
+import DA.Foldable
+
+-- | For simplicity we just use integer keys here.
+newtype KeyId = KeyId { getKeyId : Int }
+  deriving (Eq, Show)
+
+-- | This is our main template
+-- that we want to operate on.
+template T
+  with
+    p : Party
+    key : KeyId
+    value : Int
+  where
+    signatory p
+    key (p, key) : (Party, KeyId)
+    maintainer key._1
+    choice Noop : ContractId T
+      controller p
+      do create this
+
+    choice Inc : ContractId T
+      controller p
+      do create this with value = value + 1
+
+-- | This is a very naive batch processing contract
+-- that will exercise `Inc` on all contracts with the given key.
+template Batch
+  with
+    p : Party
+  where
+    signatory p
+    choice Act : ()
+      with
+        keyIds : [KeyId]
+      controller p
+      do forA_ keyIds $ \keyId -> exerciseByKey @T (p, keyId) Inc

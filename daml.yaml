@@ -1,0 +1,10 @@
+sdk-version: 1.1.1
+name: daml-contention
+version: 1.0.0
+source: src
+dependencies:
+  - daml-stdlib
+  - daml-prim
+  - daml-script
+  - daml-trigger
+init-script: Setup:setup

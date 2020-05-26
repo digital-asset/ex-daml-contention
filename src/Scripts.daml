@@ -1,0 +1,42 @@
+module Scripts where
+
+import AutoBatch
+import DA.Foldable
+import Daml.Script
+import Model
+import Lock
+
+noLock : Party -> Script ()
+noLock p = do
+  let keyIds = [KeyId i | i <- [0..999]]
+  submit p $ createAndExerciseCmd (Batch p) (Act keyIds)
+  pure ()
+
+withLock : Party -> Script ()
+withLock p = do
+  forA_ [0..9] $ \i -> do
+    let lockIndex = LockIndex i
+    lockCid <- submit p (createCmd $ Lock p lockIndex)
+    let batchKeyIds = [KeyId (i * 100 + j) | j <- [0..99]]
+    submit p $ createAndExerciseCmd (Batch p) (Act batchKeyIds)
+    submit p (exerciseCmd lockCid Archive)
+
+  let keyIds = [KeyId i | i <- [0..999]]
+  submit p $ createAndExerciseCmd (Batch p) (Act keyIds)
+  pure ()
+
+autoBatch : Party -> Script ()
+autoBatch p = do
+  let keyIds = [KeyId i | i <- [0..999]]
+  submit p $ createCmd (BatchRequest p keyIds 100 0)
+  pure ()
+
+runQuery : Party -> Script ()
+runQuery p = do
+  ts <- query @T p
+  debug ("ts: " <> show ts)
+  batchRequests <- query @BatchRequest p
+  debug ("requests: " <> show batchRequests)
+  dones <- query @RequestDone p
+  debug ("finished requests: " <> show dones)
+

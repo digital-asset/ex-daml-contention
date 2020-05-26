@@ -1,0 +1,24 @@
+module ContentionTrigger where
+
+import DA.Action
+import Daml.Trigger
+import DA.Foldable
+import DA.Next.Map (Map)
+import Model
+
+-- | This trigger will hammer all contracts within the range
+-- 100 - 200 with Noop choice to create contention.
+contentionTrigger : Trigger ()
+contentionTrigger = Trigger with
+  initialize = const ()
+  updateState = \_ _ _ -> ()
+  registeredTemplates = AllInDar
+  heartbeat = None
+  rule = contentionRule
+
+contentionRule : Party -> ACS -> Time -> Map CommandId [Command] -> () -> TriggerA ()
+contentionRule p acs _ _ _ = do
+  forA_ (getContracts @T acs) $ \(cid, c) -> do
+    when (c.key.getKeyId > 100 && c.key.getKeyId < 200) $ do
+        debug $ "exercising noop: " <> show c.key
+        void $ emitCommands [exerciseCmd cid Noop] [toAnyContractId cid]

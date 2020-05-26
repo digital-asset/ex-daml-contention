@@ -1,0 +1,57 @@
+module Lock where
+
+import qualified Model
+
+newtype LockIndex = LockIndex { getLockIndex : Int }
+  deriving (Eq, Ord, Show)
+
+template Lock
+  with
+    p : Party
+    -- lockIndex 0 means that we lock from KeyId 0 to 99
+    lockIndex : LockIndex
+  where
+    signatory p
+    key (p, lockIndex) : (Party, LockIndex)
+    maintainer key._1
+
+-- | Here, we just use integer keys and group in batches 0-99, 100-199, …
+-- In a more complex setup, you can take a hash (e.g. a SHA256)
+-- of your key and use the first/last n characters to group
+-- keys into batches.
+keyIdToLockIndex : Model.KeyId -> LockIndex
+keyIdToLockIndex (Model.KeyId i) = LockIndex (i / 100)
+
+-- | This is a wrapper around `T` that will first check the lock
+-- for the corresponding template. If the lock is present
+-- we do nothing and return `Left`. If it is not present,
+-- we proceed normally.
+--
+-- Note that using createAndExercise for this would work very well
+-- however triggers sadly do not support createAndExercise atm
+-- (see https://github.com/digital-asset/daml/issues/5956).
+-- So instead, we create a single contract and call it via
+-- exerciseByKey.
+template TLock
+  with
+    p : Party
+  where
+    signatory p
+    key p : Party
+    maintainer key
+    nonconsuming choice Noop : Either Text (ContractId Model.T)
+      with
+        keyId : Model.KeyId
+      controller p
+      do optLock <- lookupByKey @Lock (p, keyIdToLockIndex keyId)
+         case optLock of
+           None -> Right <$> exerciseByKey @Model.T (p, keyId) Model.Noop
+           Some _ -> pure (Left "Lock was present, doing nothing")
+    nonconsuming choice Inc : Either Text (ContractId Model.T)
+      with
+        keyId : Model.KeyId
+      controller p
+      do optLock <- lookupByKey @Lock (p, keyIdToLockIndex keyId)
+         case optLock of
+           None -> Right <$> exerciseByKey @Model.T (p, keyId) Model.Inc
+           Some _ -> pure (Left "Lock was present, doing nothing")

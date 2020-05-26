@@ -1,0 +1,27 @@
+module LockTrigger where
+
+import DA.Action
+import Daml.Trigger
+import DA.Foldable
+import DA.Next.Map (Map)
+import Lock
+import Model (T)
+
+-- This trigger behaves like contentionTrigger
+-- but rather than calling `Noop` directly it goes via
+-- `TLock`.
+
+lockTrigger : Trigger ()
+lockTrigger = Trigger with
+  initialize = const ()
+  updateState = \_ _ _ -> ()
+  registeredTemplates = AllInDar
+  heartbeat = None
+  rule = lockRule
+
+lockRule : Party -> ACS -> Time -> Map CommandId [Command] -> () -> TriggerA ()
+lockRule p acs _ _ _ = do
+  forA_ (getContracts @T acs) $ \(cid, c) -> do
+    when (c.key.getKeyId > 100 && c.key.getKeyId < 200) $ do
+        debug $ "exercising noop: " <> show c.key
+        void $ emitCommands [exerciseByKeyCmd @TLock p (Noop c.key)] [toAnyContractId cid]

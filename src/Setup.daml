@@ -1,0 +1,19 @@
+module Setup where
+
+import DA.Foldable
+import Daml.Script
+import Model
+import Lock
+
+setup : Script ()
+setup = do
+  p <- allocatePartyWithHint "p" (PartyIdHint "p")
+  -- We do this in 10 batches
+  -- since doing it in 1000 transactions is slow
+  -- and doing it in a single transaciton runs into an issue
+  -- in the script runner.
+  forA_ [0..9] $ \j ->
+    submit p $ forA_ [0..99] $ \i ->
+        createCmd T with p, value = 0, key = KeyId (100 * j + i)
+  submit p $ createCmd (TLock p)
+  debug "Initialization finished"
